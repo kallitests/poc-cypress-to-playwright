@@ -1,0 +1,12 @@
+# Use the official Playwright image because it bundles browsers and their system dependencies.
+FROM mcr.microsoft.com/playwright:v1.50.0-noble
+# Keep the target suite in a predictable working directory.
+WORKDIR /app
+# Copy dependency metadata first to make image rebuilds cacheable.
+COPY playwright-suite/package*.json ./
+# Install TypeScript, playwright-bdd, and the test runner without changing the lockfile contract.
+RUN npm install
+# Copy configuration, features, and steps into the image.
+COPY playwright-suite/ ./
+# Generate BDD tests and run one finite suite; the Kubernetes Job waits for completion.
+CMD ["npm", "test"]

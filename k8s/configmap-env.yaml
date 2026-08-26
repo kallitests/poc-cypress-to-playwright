@@ -1,0 +1,8 @@
+# CI applies this ConfigMap before the run with `kubectl apply`; a CronJob could schedule it, but a CI Job keeps commit-to-result traceability.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: migration-poc-env
+data:
+  BASE_URL: "https://automationexercise.com"
+  TEST_ENV: "public"

@@ -1,0 +1,6 @@
+{
+  "name": "migration-poc-playwright-suite",
+  "private": true,
+  "scripts": { "test": "npm run bddgen && playwright test", "bddgen": "bddgen", "test:ui": "npm run bddgen && playwright test --ui" },
+  "devDependencies": { "@playwright/test": "1.50.1", "@types/node": "^22.0.0", "playwright-bdd": "8.0.0", "typescript": "^5.7.0" }
+}

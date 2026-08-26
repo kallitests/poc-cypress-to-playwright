@@ -1,0 +1,19 @@
+# CI triggers this run with `kubectl apply`; use a CronJob for schedules. A Job is correct because tests terminate, unlike a Deployment.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cypress-migration-poc
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: cypress
+          image: migration-poc/cypress:${GIT_SHA:-latest}
+          envFrom:
+            - configMapRef: { name: migration-poc-env }
+            - secretRef: { name: migration-poc-secrets, optional: true }
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { cpu: "2", memory: "2Gi" }

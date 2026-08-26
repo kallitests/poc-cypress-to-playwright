@@ -1,0 +1,19 @@
+# CI triggers this run with `kubectl apply`; use a CronJob for schedules. A Job models a finite browser run and records completion.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: playwright-migration-poc
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: playwright
+          image: migration-poc/playwright:${GIT_SHA:-latest}
+          envFrom:
+            - configMapRef: { name: migration-poc-env }
+            - secretRef: { name: migration-poc-secrets, optional: true }
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { cpu: "2", memory: "2Gi" }

@@ -1,0 +1,13 @@
+services:
+  cypress:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cypress
+    environment:
+      BASE_URL: "${BASE_URL:-https://automationexercise.com}"
+  playwright:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.playwright
+    environment:
+      BASE_URL: "${BASE_URL:-https://automationexercise.com}"

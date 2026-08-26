@@ -1,0 +1,9 @@
+{
+  "name": "cypress-to-playwright-migration-poc",
+  "private": true,
+  "scripts": {
+    "test:cypress": "npm --prefix cypress-suite test",
+    "test:playwright": "npm --prefix playwright-suite test",
+    "report": "node reporting/transform-results-to-powerbi.js"
+  }
+}

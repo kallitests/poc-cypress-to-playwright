@@ -1,0 +1,14 @@
+# Use a Node image because Cypress is installed through npm.
+FROM node:20-bookworm
+# Install Chromium libraries required by headless Electron/Chromium execution.
+RUN apt-get update && apt-get install -y --no-install-recommends libgtk2.0-0 libgtk-3-0 libgbm-dev libnotify-dev libnss3 libxss1 libasound2 xvfb && rm -rf /var/lib/apt/lists/*
+# Keep the suite in a predictable working directory.
+WORKDIR /app
+# Copy dependency metadata first to make image rebuilds cacheable.
+COPY cypress-suite/package*.json ./
+# Install the Cypress runner and preprocessor dependencies.
+RUN npm ci
+# Copy only the baseline suite into the image.
+COPY cypress-suite/ ./
+# Run one finite headless test invocation; Kubernetes Job supplies completion semantics.
+CMD ["npm", "test"]

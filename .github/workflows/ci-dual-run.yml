@@ -1,0 +1,86 @@
+name: dual-run-migration
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  # Build immutable, commit-addressed images once for both runners.
+  build-images:
+    runs-on: ubuntu-latest
+    steps:
+      # Fetch source and preserve the commit SHA used in image tags.
+      - uses: actions/checkout@v4
+      # kind is lightweight, reproducible Kubernetes in Docker for this POC; it avoids cloud cost.
+      - uses: helm/kind-action@v1
+      # Build both finite test-runner images.
+      - run: docker build -f docker/Dockerfile.cypress -t migration-poc/cypress:${{ github.sha }} . && docker build -f docker/Dockerfile.playwright -t migration-poc/playwright:${{ github.sha }} .
+      # Make images available to the local kind nodes.
+      - run: kind load docker-image migration-poc/cypress:${{ github.sha }} && kind load docker-image migration-poc/playwright:${{ github.sha }}
+
+  # Execute Cypress as a Kubernetes Job and upload its JSON artifact.
+  run-cypress:
+    needs: build-images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+      - run: docker build -f docker/Dockerfile.cypress -t migration-poc/cypress:${{ github.sha }} . && kind load docker-image migration-poc/cypress:${{ github.sha }}
+      - run: sed "s#\${GIT_SHA:-latest}#${{ github.sha }}#" k8s/cypress-job.yaml | kubectl apply -f - && kubectl wait --for=condition=complete job/cypress-migration-poc --timeout=10m
+      - if: always()
+        run: kubectl logs job/cypress-migration-poc > cypress-results.json || true
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: cypress-results, path: cypress-results.json }
+
+  # Execute Playwright independently so framework failures do not mask Cypress results.
+  run-playwright:
+    needs: build-images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+      - run: docker build -f docker/Dockerfile.playwright -t migration-poc/playwright:${{ github.sha }} . && kind load docker-image migration-poc/playwright:${{ github.sha }}
+      - run: sed "s#\${GIT_SHA:-latest}#${{ github.sha }}#" k8s/playwright-job.yaml | kubectl apply -f - && kubectl wait --for=condition=complete job/playwright-migration-poc --timeout=10m
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: playwright-results, path: playwright-suite/results/playwright.json }
+
+  # Normalize only after both suites finish so parity is calculated over the same commit.
+  compare-results:
+    if: always()
+    needs: [run-cypress, run-playwright]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: reports }
+      - run: node reporting/transform-results-to-powerbi.js
+        env: { CYPRESS_REPORT: reports/cypress-results/cypress-results.json, PLAYWRIGHT_REPORT: reports/playwright-results/playwright.json, OUTPUT_FILE: comparison.json, COMMIT_SHA: ${{ github.sha }} }
+      - uses: actions/upload-artifact@v4
+        with: { name: normalized-comparison, path: comparison.json }
+
+  # Publish normalized rows only when both execution jobs succeeded and a Power BI endpoint is configured.
+  push-to-powerbi:
+    needs: compare-results
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: normalized-comparison }
+      - run: node reporting/transform-results-to-powerbi.js
+        env: { POWERBI_PUSH_URL: ${{ secrets.POWERBI_PUSH_URL }}, INPUT_FILE: comparison.json }
+
+  # Batch all failure details into three channels; green runs use Slack only to limit alert fatigue.
+  alert:
+    needs: [run-cypress, run-playwright]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node alerting/notify-slack.js
+        env: { TEST_STATUS: ${{ (needs.run-cypress.result == 'success' && needs.run-playwright.result == 'success') && 'passed' || 'failed' }}, SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}, SUMMARY_JSON: '{"cypress":"${{ needs.run-cypress.result }}","playwright":"${{ needs.run-playwright.result }}"}' }
+      - if: needs.run-cypress.result != 'success' || needs.run-playwright.result != 'success'
+        run: node alerting/notify-discord.js && node alerting/notify-gmail.js
+        env: { DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}, GMAIL_USER: ${{ secrets.GMAIL_USER }}, GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}, ALERT_TO: ${{ secrets.ALERT_TO }}, SUMMARY_JSON: '{"cypress":"${{ needs.run-cypress.result }}","playwright":"${{ needs.run-playwright.result }}"}' }

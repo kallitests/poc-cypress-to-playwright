@@ -1,0 +1,11 @@
+{
+  "name": "migration-poc-cypress-suite",
+  "private": true,
+  "scripts": { "test": "cypress run --browser electron", "test:headed": "cypress open" },
+  "devDependencies": {
+    "@badeball/cypress-cucumber-preprocessor": "^22.0.0",
+    "@bahmutov/cypress-esbuild-preprocessor": "^2.2.0",
+    "cypress": "^14.0.0",
+    "mochawesome": "^7.1.3"
+  }
+}

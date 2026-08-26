@@ -1,0 +1,6 @@
+node_modules/
+results/
+playwright-report/
+comparison.json
+powerbi-rows.json
+.env
