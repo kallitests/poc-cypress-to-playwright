@@ -1,0 +1,52 @@
+name: agent-eval-harness CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Tests d'évaluation LLM-as-judge lancés une fois par nuit seulement :
+    # trop coûteux (2 appels LLM par cas) pour tourner sur chaque PR.
+    - cron: "0 3 * * *"
+
+jobs:
+  unit-tests:
+    # Tourne sur CHAQUE pull request : rapide, gratuit, aucun secret requis.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/test_agent_unit.py -v
+
+  integration-tests:
+    # Tourne sur chaque PR aussi, mais nécessite la clé API en secret.
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest -m integration -v
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  eval-tests:
+    # Uniquement sur le cron nocturne : c'est le niveau le plus coûteux,
+    # pas justifié sur chaque commit.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest -m eval -v
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}

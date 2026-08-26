@@ -1,0 +1,30 @@
+[project]
+name = "agent-eval-harness"
+version = "0.1.0"
+description = "Harnais pytest pour tester des agents LangGraph — unitaire, intégration, évaluation LLM-judge via LangSmith"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain>=0.3.0",
+    "langchain-anthropic>=0.3.0",
+    "langgraph>=0.2.0",
+    "langsmith>=0.2.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests avec vrai appel LLM, coûtent des tokens (pytest -m integration)",
+    "eval: tests d'évaluation LLM-as-judge, encore plus coûteux (pytest -m eval)",
+]
+# Par défaut, en local, on veut la boucle rapide unitaire uniquement.
+addopts = "-m 'not integration and not eval' -v"
+
+[tool.setuptools.packages.find]
+where = ["src"]
