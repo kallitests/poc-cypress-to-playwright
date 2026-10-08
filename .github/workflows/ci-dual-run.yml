@@ -61,11 +61,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history for the secret scan
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -127,13 +127,13 @@ jobs:
       matrix:
         suite: [cypress, playwright]
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
 
       # Commit-addressed, immutable tag. The GitHub Actions cache (scope per suite) is reused by run-suite.
       - name: Build migration-poc/${{ matrix.suite }}:${{ env.IMAGE_TAG }}
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile.${{ matrix.suite }}
@@ -156,7 +156,7 @@ jobs:
             echo '<details><summary>Report</summary>'; echo; echo '```'; head -n 150 "security/trivy-${{ matrix.suite }}.txt"; echo '```'; echo '</details>'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: security-${{ matrix.suite }}
           path: security/
@@ -179,7 +179,7 @@ jobs:
       JOB_NAME: ${{ matrix.suite }}-migration-poc
       RESULTS_DIR: ${{ github.workspace }}/k8s-results
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The runner folder k8s-results/ is bind-mounted into the kind node, then into the pods (hostPath),
       # so reports written by the containers are available to the next steps.
@@ -196,10 +196,10 @@ jobs:
           cluster_name: migration-poc
           config: ${{ runner.temp }}/kind-config.yaml
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # Rebuild from the warm GHA cache (seconds) instead of moving multi-GB image tarballs between jobs.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile.${{ matrix.suite }}
@@ -243,7 +243,7 @@ jobs:
           kubectl get events --sort-by=.lastTimestamp | tail -n 40
 
       # Shards wrote one blob report each; merge them into a single HTML report (with traces) and one JSON.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         if: always() && matrix.suite == 'playwright'
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -270,7 +270,7 @@ jobs:
           mkdir -p merged
           cp -r "$RESULTS_DIR/cypress" merged/cypress 2>/dev/null || echo "::warning::No Cypress report found."
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: results-${{ matrix.suite }}
@@ -278,7 +278,7 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always() && matrix.suite == 'playwright'
         with:
           name: playwright-html-report
@@ -303,12 +303,12 @@ jobs:
       status: ${{ steps.parity.outputs.status }}
       failures: ${{ steps.parity.outputs.failures }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: results-*
           path: reports
@@ -343,12 +343,12 @@ jobs:
       - name: Sticky PR comment
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         continue-on-error: true
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: dual-run-parity
           path: pr-comment.md
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: parity-report
@@ -377,11 +377,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: parity-report
       # Failing runs are pushed too: the dashboard tracks pass rate and flakiness over time.
@@ -401,13 +401,13 @@ jobs:
       TEST_STATUS: ${{ (needs.run-suite.result == 'success' && needs.parity-gate.outputs.status == 'passed') && 'passed' || 'failed' }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci --no-audit --no-fund
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         continue-on-error: true
         with:
           name: parity-report
@@ -434,7 +434,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: evidence
           pattern: '{security-*,parity-report}'
@@ -462,7 +462,7 @@ jobs:
           JSON
           (cd evidence && find . -type f -exec sha256sum {} + > "$RUNNER_TEMP/SHA256SUMS") && mv "$RUNNER_TEMP/SHA256SUMS" evidence/SHA256SUMS
           cat evidence/manifest.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: evidence-${{ github.sha }}
           path: evidence/
