@@ -1,5 +1,5 @@
 # Use a Node image because Cypress is installed through npm.
-FROM node:20-bookworm
+FROM node:25-bookworm
 # Install the libraries headless Electron/Chromium needs (GTK, NSS, ALSA) plus Xvfb, which Cypress uses as a virtual display.
 RUN apt-get update && apt-get install -y --no-install-recommends libgtk2.0-0 libgtk-3-0 libgbm-dev libnotify-dev libnss3 libxss1 libasound2 libxtst6 xauth xvfb && rm -rf /var/lib/apt/lists/*
 # Keep the suite in a predictable working directory.
