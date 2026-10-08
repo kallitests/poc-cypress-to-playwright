@@ -10,6 +10,6 @@
     "compare": "node reporting/parity-report.js"
   },
   "dependencies": {
-    "nodemailer": "^6.9.16"
+    "nodemailer": "^10.0.15"
   }
 }
