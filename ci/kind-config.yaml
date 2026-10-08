@@ -1,0 +1,9 @@
+# kind cluster used by CI. ${RESULTS_DIR} (absolute path on the runner) is bind-mounted into the node
+# at /results; the Jobs' hostPath volumes write there, so reports survive the pod and reach the runner.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: ${RESULTS_DIR}
+        containerPath: /results

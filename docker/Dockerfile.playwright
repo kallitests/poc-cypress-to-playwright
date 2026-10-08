@@ -1,12 +1,15 @@
-# Use the official Playwright image because it bundles browsers and their system dependencies.
-FROM mcr.microsoft.com/playwright:v1.50.0-noble
+# Use the official Playwright image: it bundles the browsers AND their system libraries.
+# Its version MUST match @playwright/test in package-lock.json, otherwise the runner looks for browser builds that are not installed.
+FROM mcr.microsoft.com/playwright:v1.50.1-noble
 # Keep the target suite in a predictable working directory.
 WORKDIR /app
-# Copy dependency metadata first to make image rebuilds cacheable.
-COPY playwright-suite/package*.json ./
-# Install TypeScript, playwright-bdd, and the test runner without changing the lockfile contract.
-RUN npm install
-# Copy configuration, features, and steps into the image.
+# Copy dependency metadata first so the npm layer is cached until the lockfile changes.
+COPY playwright-suite/package.json playwright-suite/package-lock.json ./
+# Reproducible install from the lockfile (fails if package.json and the lockfile disagree).
+RUN npm ci --no-audit --no-fund
+# Copy configuration, features, and steps (node_modules and generated files are excluded by .dockerignore).
 COPY playwright-suite/ ./
-# Generate BDD tests and run one finite suite; the Kubernetes Job waits for completion.
+# CI=true enables retries, blob reports and forbidOnly in playwright.config.ts.
+ENV CI=true
+# Generate BDD tests and run one finite suite; the Kubernetes Job records completion.
 CMD ["npm", "test"]

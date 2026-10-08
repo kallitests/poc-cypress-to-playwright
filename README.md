@@ -3,6 +3,8 @@
 > **Runnable Cypress → Playwright migration exercise.**
 > The same English Gherkin intent, executed by both the original Cypress suite and the target Playwright suite, then compared in a dual-run CI pipeline.
 
+[![dual-run-migration](https://github.com/kallitests/poc-cypress-to-playwright/actions/workflows/ci-dual-run.yml/badge.svg)](https://github.com/kallitests/poc-cypress-to-playwright/actions/workflows/ci-dual-run.yml)
+[![agent-eval-harness](https://github.com/kallitests/poc-cypress-to-playwright/actions/workflows/agent-eval.yml/badge.svg)](https://github.com/kallitests/poc-cypress-to-playwright/actions/workflows/agent-eval.yml)
 [![Status](https://img.shields.io/badge/status-WIP-orange?style=flat-square)](https://github.com/kallitests/poc-cypress-to-playwright)
 [![Node.js](https://img.shields.io/badge/node-20+-339933?style=flat-square&logo=node.js)](https://nodejs.org)
 [![Cypress](https://img.shields.io/badge/Cypress-baseline-17202C?style=flat-square&logo=cypress)](https://www.cypress.io)
@@ -50,7 +52,11 @@ Playwright suite ┘
 | 🎭 **Target suite** | Playwright + `playwright-bdd`, migrated step by step with documented decisions |
 | 🐳 **Independent runners** | Dockerized headless images per suite, no shared state |
 | ☸️ **Run-to-completion jobs** | Kubernetes Jobs (not Deployments) for each suite, triggered from CI |
-| 🔁 **Dual-run pipeline** | GitHub Actions runs both suites in parallel against a `kind` cluster, then compares results |
+| 🔁 **Dual-run pipeline** | GitHub Actions runs both suites in parallel against a `kind` cluster (Playwright sharded across an Indexed Job), then compares results |
+| 🚦 **Parity gate** | Executable sign-off criteria: same scenario inventory, no migration regression, pass-rate parity, optional flakiness budget — posted as a PR comment |
+| 🤖 **AI failure triage** | Advisory LLM classification of each failure (product bug, test bug, migration gap, flaky, environment, data) with guardrails |
+| 🔐 **DevSecOps checks** | actionlint, hadolint, kubeconform, gitleaks, Trivy image scan + CycloneDX SBOM, Dependabot |
+| 🧾 **Audit evidence** | One bundle per commit: SHA, image IDs, SBOMs, parity report, checksums (regulated-context habit) |
 | 🚨 **Batched alerting** | Slack, Discord, and Gmail notifications — one message per run, not per failing scenario |
 | 📊 **Power BI reporting** | Normalized results pushed to a streaming dataset for a live pass-rate dashboard |
 
@@ -101,7 +107,9 @@ Playwright suite ┘
 | **Test intent** | Gherkin (English), shared between both suites |
 | **Containerization** | Docker (independent images per suite) |
 | **Orchestration** | Kubernetes Jobs (run-to-completion) |
-| **CI/CD** | GitHub Actions, `kind` (Kubernetes in Docker) |
+| **CI/CD** | GitHub Actions, `kind` (Kubernetes in Docker), BuildKit GHA cache |
+| **Quality & security gates** | Parity gate (Node), actionlint, hadolint, kubeconform, gitleaks, Trivy |
+| **AI** | Claude API (failure triage), LangGraph + pytest agent harness (`agents/test-agent`) |
 | **Alerting** | Slack · Discord · Gmail (batched, one message per run) |
 | **Reporting** | Power BI streaming dataset |
 
@@ -119,9 +127,12 @@ poc-cypress-to-playwright/
 │   └── COVERAGE_COMPARISON.md
 ├── docker/                   # Independent headless runner images
 ├── k8s/                      # Run-to-completion Jobs & environment templates
-├── .github/workflows/        # Dual-run kind pipeline
+├── .github/workflows/        # Dual-run kind pipeline + agent eval harness
+├── ci/                       # kind config & Job wait helper used by CI
+├── ai/                       # Advisory AI failure triage (Claude API)
+├── agents/test-agent/        # Pytest harness for a LangGraph agent (unit / integration / eval)
 ├── alerting/                 # Batched Slack, Discord, and Gmail notifications
-├── reporting/                # Report normalization & Power BI streaming schema
+├── reporting/                # Report normalization, parity gate & Power BI streaming schema
 ├── docker-compose.yml
 ├── package.json
 ├── CODE_WALKTHROUGH.md       # 10-minute tour of the repo
@@ -142,9 +153,9 @@ npm run test:cypress
 npm run test:playwright
 ```
 
-The public site can change, so UI checks use roles, labels, and stable `data-qa` selectors where available, with assertions focused on observable behavior. Set `BASE_URL` to point at a controlled environment when reproducibility matters. API and login scenarios use `TEST_USER_EMAIL` and `TEST_USER_PASSWORD`; login scenarios are skipped when credentials are not supplied.
+The public site can change, so UI checks use roles, labels, and stable `data-qa` selectors where available, with assertions focused on observable behavior. Set `BASE_URL` to point at a controlled environment when reproducibility matters. API and login scenarios use `TEST_USER_EMAIL` and `TEST_USER_PASSWORD`; login scenarios fail explicitly (in both suites) when credentials are not supplied — set the `TEST_USER_EMAIL` / `TEST_USER_PASSWORD` repository secrets for CI.
 
-See [CODE_WALKTHROUGH.md](CODE_WALKTHROUGH.md) for the ten-minute tour and [migration/MODUS_OPERANDI.md](migration/MODUS_OPERANDI.md) for the migration method.
+The CI pipeline (jobs, parity gate, secrets, artifacts) is documented in [docs/CI-PIPELINE.md](docs/CI-PIPELINE.md). See [CODE_WALKTHROUGH.md](CODE_WALKTHROUGH.md) for the ten-minute tour and [migration/MODUS_OPERANDI.md](migration/MODUS_OPERANDI.md) for the migration method.
 
 ---
 
@@ -159,8 +170,14 @@ See [CODE_WALKTHROUGH.md](CODE_WALKTHROUGH.md) for the ten-minute tour and [migr
 - [x] Dual-run GitHub Actions pipeline on `kind`
 - [x] Batched Slack/Discord/Gmail alerting
 - [x] Power BI streaming reporting
+- [x] Parity gate with sticky PR comment & job summary
+- [x] Playwright sharding with a Kubernetes Indexed Job + merged HTML report
+- [x] Nightly flakiness tracking (`--repeat-each`, retries → `flaky` status)
+- [x] Advisory AI failure triage
+- [x] DevSecOps checks (actionlint, hadolint, kubeconform, gitleaks, Trivy, SBOM) & audit evidence bundle
 - [ ] Live Power BI dashboard screenshots in README
-- [ ] Extend coverage comparison with flakiness tracking over time
+- [ ] Playwright MCP / Playwright Agents to propose fixes for `MIGRATION_GAP` failures (human-reviewed PR)
+- [ ] Decommission the Cypress job once the parity gate has been green for N consecutive nightly runs
 
 ⭐ Star this repo to follow the progress.
 

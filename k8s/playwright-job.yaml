@@ -1,19 +1,43 @@
-# CI triggers this run with `kubectl apply`; use a CronJob for schedules. A Job models a finite browser run and records completion.
+# Run-to-completion Playwright suite, sharded with a Kubernetes *Indexed* Job.
+# Each pod receives JOB_COMPLETION_INDEX (0..N-1) and runs shard index+1 of N, so parallelism
+# comes from the cluster itself — no paid orchestration service (the Cypress Cloud equivalent) needed.
+# CI renders this template with
+#   envsubst '${IMAGE_TAG} ${PW_SHARDS}' < k8s/playwright-job.yaml | kubectl apply -f -
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: playwright-migration-poc
+  labels: { app.kubernetes.io/part-of: migration-poc, suite: playwright }
 spec:
-  backoffLimit: 1
+  completionMode: Indexed
+  completions: ${PW_SHARDS}
+  parallelism: ${PW_SHARDS}
+  # backoffLimitPerIndex (K8s >= 1.29) lets a failing shard fail alone while the other shards finish,
+  # instead of the whole Job being terminated at the first red test.
+  backoffLimitPerIndex: 0
+  activeDeadlineSeconds: 1200
+  ttlSecondsAfterFinished: 3600
   template:
+    metadata:
+      labels: { app.kubernetes.io/part-of: migration-poc, suite: playwright }
     spec:
       restartPolicy: Never
       containers:
         - name: playwright
-          image: migration-poc/playwright:${GIT_SHA:-latest}
+          image: migration-poc/playwright:${IMAGE_TAG}
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "export PW_SHARD=\"$((JOB_COMPLETION_INDEX + 1))/${PW_SHARDS}\" && echo \"shard $PW_SHARD\" && npm test"]
+          env:
+            - { name: CI, value: "true" }
           envFrom:
             - configMapRef: { name: migration-poc-env }
             - secretRef: { name: migration-poc-secrets, optional: true }
           resources:
             requests: { cpu: "500m", memory: "1Gi" }
             limits: { cpu: "2", memory: "2Gi" }
+          volumeMounts:
+            - { name: results, mountPath: /app/results }
+      volumes:
+        # POC only: see cypress-job.yaml. Shards write distinct blob/json files into the same folder.
+        - name: results
+          hostPath: { path: /results/playwright, type: DirectoryOrCreate }

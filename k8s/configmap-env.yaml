@@ -1,4 +1,5 @@
-# CI applies this ConfigMap before the run with `kubectl apply`; a CronJob could schedule it, but a CI Job keeps commit-to-result traceability.
+# Non-secret runtime configuration shared by both Jobs. CI applies it before the run and may override
+# BASE_URL / PW_REPEAT_EACH (workflow_dispatch input, nightly flake hunting) with `kubectl create configmap --dry-run | kubectl apply`.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,3 +7,4 @@ metadata:
 data:
   BASE_URL: "https://automationexercise.com"
   TEST_ENV: "public"
+  PW_REPEAT_EACH: "1"

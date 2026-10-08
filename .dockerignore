@@ -1,0 +1,13 @@
+# Keep host-installed dependencies (e.g. Windows node_modules) and generated output out of the images:
+# the Dockerfiles install Linux dependencies themselves with `npm ci`.
+**/node_modules
+**/results
+**/test-results
+**/playwright-report
+**/blob-report
+**/.features-gen
+.git
+.github
+k8s-results
+agents
+docs

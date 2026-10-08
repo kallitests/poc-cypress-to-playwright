@@ -1,86 +1,469 @@
+# Cypress -> Playwright dual-run migration pipeline.
+#
+#   static-checks ──▶ build-images (matrix) ──▶ run-suite (matrix: cypress | playwright on kind)
+#                                                        │
+#                                                        ▼
+#                                                  parity-gate ──▶ push-to-powerbi (main)
+#                                                        │      ──▶ alert (main / nightly)
+#                                                        └──────▶ evidence (audit trail)
+#
+# - Pull requests: static checks, image build + scan, dual run, parity gate, AI triage, sticky PR comment.
+# - main:          the same, plus Power BI push and alerting.
+# - nightly:       the same with PW_REPEAT_EACH=3 to hunt flaky scenarios.
+# - manual:        workflow_dispatch to point the suites at another BASE_URL or change sharding.
 name: dual-run-migration
+
 on:
   pull_request:
+    paths-ignore: ['**/*.md', 'docs/**', 'agents/**']
   push:
     branches: [main]
+    paths-ignore: ['**/*.md', 'docs/**', 'agents/**']
+  schedule:
+    # Weekdays 02:30 UTC: flakiness tracking over repeated executions.
+    - cron: '30 2 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'Application under test (empty = k8s/configmap-env.yaml default)'
+        required: false
+        default: ''
+      repeat_each:
+        description: 'Playwright --repeat-each (flake hunting)'
+        required: false
+        default: '1'
+      playwright_shards:
+        description: 'Number of Playwright shards (pods of the Indexed Job)'
+        required: false
+        default: '2'
+
+# Least privilege by default; jobs that need more ask for it explicitly.
+permissions:
+  contents: read
+
+# A new push to the same PR cancels the obsolete run; main and nightly runs always complete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE_TAG: ${{ github.sha }}
+  PW_SHARDS: ${{ inputs.playwright_shards || '2' }}
+  PW_REPEAT_EACH: ${{ inputs.repeat_each || (github.event_name == 'schedule' && '3') || '1' }}
+  NODE_VERSION: '20'
 
 jobs:
-  # Build immutable, commit-addressed images once for both runners.
+  # ---------------------------------------------------------------------------
+  # 1. Fast quality gates: fail in ~2 minutes before spending browser minutes.
+  # ---------------------------------------------------------------------------
+  static-checks:
+    name: Static checks & security lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for the secret scan
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      # The migration contract: Gherkin intent must be byte-for-byte identical in both suites.
+      - name: Gherkin parity (same .feature files in both suites)
+        run: diff -ru cypress-suite/cypress/e2e/features playwright-suite/tests/features
+
+      # The gate's own code is tested before it is allowed to judge the suites.
+      - name: Unit tests of the CI tooling (normalizer, parity gate, AI triage parser)
+        run: |
+          npm ci --no-audit --no-fund
+          npm run test:tooling
+          for f in alerting/*.js reporting/*.js reporting/lib/*.js ai/*.js; do node --check "$f"; done
+
+      - name: Playwright suite compiles and every scenario is discovered
+        working-directory: playwright-suite
+        run: |
+          npm ci --no-audit --no-fund
+          npx tsc --noEmit -p .
+          npx bddgen
+          expected=$(grep -h -c -E '^\s*Scenario( Outline)?:' tests/features/*.feature | awk '{s+=$1} END {print s}')
+          listed=$(npx playwright test --list --reporter=list | grep -c '›' || true)
+          echo "Scenarios in Gherkin: $expected — tests listed by Playwright: $listed"
+          if [ "$listed" -lt "$expected" ]; then echo "::error::Playwright lists $listed tests but the features define $expected scenarios"; exit 1; fi
+
+      - name: Lint GitHub Actions workflows (actionlint + shellcheck)
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color
+
+      - name: Lint Dockerfiles (hadolint)
+        run: |
+          for f in docker/Dockerfile.*; do
+            echo "── $f"
+            docker run --rm -i hadolint/hadolint:v2.12.0 hadolint --failure-threshold error - < "$f"
+          done
+
+      - name: Validate Kubernetes manifests (kubeconform)
+        run: |
+          mkdir -p "$RUNNER_TEMP/k8s"
+          # shellcheck disable=SC2016 # single quotes on purpose: envsubst only replaces the listed variables
+          for f in k8s/*.yaml; do dest="$RUNNER_TEMP/k8s/$(basename "$f")"; envsubst '${IMAGE_TAG} ${PW_SHARDS}' < "$f" > "$dest"; done
+          docker run --rm -v "$RUNNER_TEMP/k8s:/k8s:ro" ghcr.io/yannh/kubeconform:v0.6.7 -strict -summary -kubernetes-version 1.32.0 /k8s
+
+      - name: Secret scan (gitleaks)
+        run: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.21.2 detect --source=/repo --redact --no-banner -v
+
+  # ---------------------------------------------------------------------------
+  # 2. Build each runner image once, scan it, produce an SBOM, warm the layer cache.
+  # ---------------------------------------------------------------------------
   build-images:
+    name: Build & scan image (${{ matrix.suite }})
+    needs: static-checks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        suite: [cypress, playwright]
     steps:
-      # Fetch source and preserve the commit SHA used in image tags.
       - uses: actions/checkout@v4
-      # kind is lightweight, reproducible Kubernetes in Docker for this POC; it avoids cloud cost.
-      - uses: helm/kind-action@v1
-      # Build both finite test-runner images.
-      - run: docker build -f docker/Dockerfile.cypress -t migration-poc/cypress:${{ github.sha }} . && docker build -f docker/Dockerfile.playwright -t migration-poc/playwright:${{ github.sha }} .
-      # Make images available to the local kind nodes.
-      - run: kind load docker-image migration-poc/cypress:${{ github.sha }} && kind load docker-image migration-poc/playwright:${{ github.sha }}
+      - uses: docker/setup-buildx-action@v3
 
-  # Execute Cypress as a Kubernetes Job and upload its JSON artifact.
-  run-cypress:
-    needs: build-images
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: helm/kind-action@v1
-      - run: docker build -f docker/Dockerfile.cypress -t migration-poc/cypress:${{ github.sha }} . && kind load docker-image migration-poc/cypress:${{ github.sha }}
-      - run: sed "s#\${GIT_SHA:-latest}#${{ github.sha }}#" k8s/cypress-job.yaml | kubectl apply -f - && kubectl wait --for=condition=complete job/cypress-migration-poc --timeout=10m
-      - if: always()
-        run: kubectl logs job/cypress-migration-poc > cypress-results.json || true
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with: { name: cypress-results, path: cypress-results.json }
+      # Commit-addressed, immutable tag. The GitHub Actions cache (scope per suite) is reused by run-suite.
+      - name: Build migration-poc/${{ matrix.suite }}:${{ env.IMAGE_TAG }}
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.${{ matrix.suite }}
+          tags: migration-poc/${{ matrix.suite }}:${{ env.IMAGE_TAG }}
+          load: true
+          cache-from: type=gha,scope=${{ matrix.suite }}
+          cache-to: type=gha,scope=${{ matrix.suite }},mode=max
 
-  # Execute Playwright independently so framework failures do not mask Cypress results.
-  run-playwright:
-    needs: build-images
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: helm/kind-action@v1
-      - run: docker build -f docker/Dockerfile.playwright -t migration-poc/playwright:${{ github.sha }} . && kind load docker-image migration-poc/playwright:${{ github.sha }}
-      - run: sed "s#\${GIT_SHA:-latest}#${{ github.sha }}#" k8s/playwright-job.yaml | kubectl apply -f - && kubectl wait --for=condition=complete job/playwright-migration-poc --timeout=10m
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with: { name: playwright-results, path: playwright-suite/results/playwright.json }
+      # Report-only for now (browser base images always carry CVEs): switch --exit-code to 1 to make it blocking.
+      - name: Vulnerability scan + SBOM (Trivy)
+        run: |
+          mkdir -p security
+          image="migration-poc/${{ matrix.suite }}:${IMAGE_TAG}"
+          trivy() { docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$HOME/.cache/trivy:/root/.cache/trivy" -v "$PWD/security:/out" aquasec/trivy:0.58.1 "$@"; }
+          trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 --format table --output "/out/trivy-${{ matrix.suite }}.txt" "$image"
+          trivy image --format cyclonedx --output "/out/sbom-${{ matrix.suite }}.cdx.json" "$image"
+          echo "${{ steps.build.outputs.imageid }}" > "security/image-id-${{ matrix.suite }}.txt"
+          {
+            echo "### 🔐 Trivy — ${{ matrix.suite }} image (HIGH/CRITICAL, fixable)"
+            echo '<details><summary>Report</summary>'; echo; echo '```'; head -n 150 "security/trivy-${{ matrix.suite }}.txt"; echo '```'; echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-  # Normalize only after both suites finish so parity is calculated over the same commit.
-  compare-results:
-    if: always()
-    needs: [run-cypress, run-playwright]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with: { path: reports }
-      - run: node reporting/transform-results-to-powerbi.js
-        env: { CYPRESS_REPORT: reports/cypress-results/cypress-results.json, PLAYWRIGHT_REPORT: reports/playwright-results/playwright.json, OUTPUT_FILE: comparison.json, COMMIT_SHA: ${{ github.sha }} }
       - uses: actions/upload-artifact@v4
-        with: { name: normalized-comparison, path: comparison.json }
+        with:
+          name: security-${{ matrix.suite }}
+          path: security/
+          retention-days: 90
 
-  # Publish normalized rows only when both execution jobs succeeded and a Power BI endpoint is configured.
-  push-to-powerbi:
-    needs: compare-results
-    if: github.ref == 'refs/heads/main'
+  # ---------------------------------------------------------------------------
+  # 3. Run each suite as a Kubernetes Job on a disposable kind cluster.
+  #    Independent matrix legs: a Playwright failure never masks the Cypress result (fail-fast: false).
+  # ---------------------------------------------------------------------------
+  run-suite:
+    name: Run ${{ matrix.suite }} on kind
+    needs: build-images
     runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [cypress, playwright]
+    env:
+      JOB_NAME: ${{ matrix.suite }}-migration-poc
+      RESULTS_DIR: ${{ github.workspace }}/k8s-results
     steps:
       - uses: actions/checkout@v4
+
+      # The runner folder k8s-results/ is bind-mounted into the kind node, then into the pods (hostPath),
+      # so reports written by the containers are available to the next steps.
+      - name: Prepare kind config
+        run: |
+          mkdir -p "$RESULTS_DIR"
+          # shellcheck disable=SC2016 # envsubst variable list, not a shell expansion
+          envsubst '${RESULTS_DIR}' < ci/kind-config.yaml > "$RUNNER_TEMP/kind-config.yaml"
+
+      # kind = real Kubernetes API in Docker: free, ~1 min to start, reproducible — enough to prove the Job design.
+      - uses: helm/kind-action@v1
+        with:
+          version: v0.27.0
+          cluster_name: migration-poc
+          config: ${{ runner.temp }}/kind-config.yaml
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Rebuild from the warm GHA cache (seconds) instead of moving multi-GB image tarballs between jobs.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.${{ matrix.suite }}
+          tags: migration-poc/${{ matrix.suite }}:${{ env.IMAGE_TAG }}
+          load: true
+          cache-from: type=gha,scope=${{ matrix.suite }}
+
+      - name: Load image into kind
+        run: kind load docker-image "migration-poc/${{ matrix.suite }}:${IMAGE_TAG}" --name migration-poc
+
+      - name: Apply configuration and test credentials
+        env:
+          BASE_URL_INPUT: ${{ inputs.base_url }}
+          TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
+        run: |
+          kubectl apply -f k8s/configmap-env.yaml
+          kubectl patch configmap migration-poc-env --type merge -p "{\"data\":{\"PW_REPEAT_EACH\":\"${PW_REPEAT_EACH}\"}}"
+          if [ -n "$BASE_URL_INPUT" ]; then
+            kubectl patch configmap migration-poc-env --type merge -p "{\"data\":{\"BASE_URL\":\"${BASE_URL_INPUT}\"}}"
+          fi
+          # Only the credentials the scenarios need reach the pods; scenarios needing them fail explicitly otherwise.
+          if [ -n "$TEST_USER_EMAIL" ]; then
+            kubectl create secret generic migration-poc-secrets \
+              --from-literal=TEST_USER_EMAIL="$TEST_USER_EMAIL" \
+              --from-literal=TEST_USER_PASSWORD="$TEST_USER_PASSWORD"
+          else
+            echo "::notice::TEST_USER_EMAIL/TEST_USER_PASSWORD secrets not set — login scenarios will fail in both suites."
+          fi
+
+      - name: Run ${{ matrix.suite }} Job
+        run: |
+          # shellcheck disable=SC2016 # envsubst variable list, not a shell expansion
+          envsubst '${IMAGE_TAG} ${PW_SHARDS}' < "k8s/${{ matrix.suite }}-job.yaml" | kubectl apply -f -
+          ci/wait-for-job.sh "$JOB_NAME" 1800
+
+      - name: Kubernetes diagnostics
+        if: failure()
+        run: |
+          kubectl get pods -o wide
+          kubectl get events --sort-by=.lastTimestamp | tail -n 40
+
+      # Shards wrote one blob report each; merge them into a single HTML report (with traces) and one JSON.
+      - uses: actions/setup-node@v4
+        if: always() && matrix.suite == 'playwright'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: playwright-suite/package-lock.json
+
+      - name: Merge Playwright shard reports
+        if: always() && matrix.suite == 'playwright'
+        working-directory: playwright-suite
+        run: |
+          npm ci --no-audit --no-fund
+          mkdir -p "$RUNNER_TEMP/blob" "$GITHUB_WORKSPACE/merged/playwright"
+          find "$RESULTS_DIR/playwright/blob" -name '*.zip' -maxdepth 2 -exec cp {} "$RUNNER_TEMP/blob/" \; || true
+          if ls "$RUNNER_TEMP"/blob/*.zip >/dev/null 2>&1; then
+            PLAYWRIGHT_HTML_OUTPUT_DIR="$GITHUB_WORKSPACE/merged/playwright-html" PLAYWRIGHT_HTML_REPORT="$GITHUB_WORKSPACE/merged/playwright-html" npx playwright merge-reports --reporter html "$RUNNER_TEMP/blob"
+            PLAYWRIGHT_JSON_OUTPUT_NAME="$GITHUB_WORKSPACE/merged/playwright/playwright.json" npx playwright merge-reports --reporter json "$RUNNER_TEMP/blob"
+          else
+            echo "::warning::No Playwright blob report found — the Job probably failed before running tests."
+          fi
+
+      - name: Collect Cypress reports
+        if: always() && matrix.suite == 'cypress'
+        run: |
+          mkdir -p merged
+          cp -r "$RESULTS_DIR/cypress" merged/cypress 2>/dev/null || echo "::warning::No Cypress report found."
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.suite }}
+          path: merged/${{ matrix.suite }}
+          retention-days: 14
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.suite == 'playwright'
+        with:
+          name: playwright-html-report
+          path: merged/playwright-html
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # 4. Parity gate: waits for BOTH suites (same commit, same environment) before comparing.
+  # ---------------------------------------------------------------------------
+  parity-gate:
+    name: Parity gate & AI triage
+    needs: run-suite
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write # sticky PR comment
+    outputs:
+      gate: ${{ steps.parity.outputs.gate }}
+      status: ${{ steps.parity.outputs.status }}
+      failures: ${{ steps.parity.outputs.failures }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
       - uses: actions/download-artifact@v4
-        with: { name: normalized-comparison }
-      - run: node reporting/transform-results-to-powerbi.js
-        env: { POWERBI_PUSH_URL: ${{ secrets.POWERBI_PUSH_URL }}, INPUT_FILE: comparison.json }
+        with:
+          pattern: results-*
+          path: reports
 
-  # Batch all failure details into three channels; green runs use Slack only to limit alert fatigue.
-  alert:
-    needs: [run-cypress, run-playwright]
-    if: always()
+      - name: Normalize Cypress + Playwright results
+        env:
+          CYPRESS_REPORT: reports/results-cypress
+          PLAYWRIGHT_REPORT: reports/results-playwright
+          OUTPUT_FILE: comparison.json
+        run: node reporting/transform-results-to-powerbi.js
+
+      - name: Evaluate sign-off criteria (MODUS_OPERANDI §4)
+        id: parity
+        env:
+          INPUT_FILE: comparison.json
+          GATE_ENFORCE: 'false' # enforced in the last step, after triage and PR comment
+          GATE_MAX_FLAKY: ${{ vars.GATE_MAX_FLAKY || '-1' }}
+        run: node reporting/parity-report.js
+
+      # Advisory LLM classification of failures (product bug / test bug / migration gap / flaky / env / data).
+      - name: AI failure triage (advisory)
+        if: steps.parity.outputs.failures != '0' || github.event_name == 'schedule'
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TRIAGE_MODEL: ${{ vars.TRIAGE_MODEL || 'claude-sonnet-5-5' }}
+        run: node ai/triage-failures.js
+
+      - name: Build PR comment
+        run: cat comparison.md triage.md > pr-comment.md 2>/dev/null || cp comparison.md pr-comment.md
+
+      - name: Sticky PR comment
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: dual-run-parity
+          path: pr-comment.md
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parity-report
+          path: |
+            comparison.json
+            comparison-summary.json
+            comparison.md
+            triage.md
+            triage.json
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Enforce parity gate
+        if: steps.parity.outputs.gate != 'pass'
+        run: |
+          echo "::error::Parity gate failed — see the job summary / PR comment for the failing sign-off checks."
+          exit 1
+
+  # ---------------------------------------------------------------------------
+  # 5. Reporting & alerting (main and nightly only: PRs get the sticky comment instead).
+  # ---------------------------------------------------------------------------
+  push-to-powerbi:
+    name: Push rows to Power BI
+    needs: parity-gate
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: parity-report
+      # Failing runs are pushed too: the dashboard tracks pass rate and flakiness over time.
+      - run: node reporting/transform-results-to-powerbi.js
+        env:
+          INPUT_FILE: comparison.json
+          POWERBI_PUSH_URL: ${{ secrets.POWERBI_PUSH_URL }}
+
+  alert:
+    name: Notify (Slack / Discord / Gmail)
+    needs: [run-suite, parity-gate]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SUMMARY_FILE: comparison-summary.json
+      TEST_STATUS: ${{ (needs.run-suite.result == 'success' && needs.parity-gate.outputs.status == 'passed') && 'passed' || 'failed' }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: parity-report
+      # Green runs: one lightweight Slack summary. Red runs: one batched message per channel.
       - run: node alerting/notify-slack.js
-        env: { TEST_STATUS: ${{ (needs.run-cypress.result == 'success' && needs.run-playwright.result == 'success') && 'passed' || 'failed' }}, SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}, SUMMARY_JSON: '{"cypress":"${{ needs.run-cypress.result }}","playwright":"${{ needs.run-playwright.result }}"}' }
-      - if: needs.run-cypress.result != 'success' || needs.run-playwright.result != 'success'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      - if: env.TEST_STATUS != 'passed' || needs.parity-gate.outputs.gate != 'pass'
         run: node alerting/notify-discord.js && node alerting/notify-gmail.js
-        env: { DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}, GMAIL_USER: ${{ secrets.GMAIL_USER }}, GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}, ALERT_TO: ${{ secrets.ALERT_TO }}, SUMMARY_JSON: '{"cypress":"${{ needs.run-cypress.result }}","playwright":"${{ needs.run-playwright.result }}"}' }
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+
+  # ---------------------------------------------------------------------------
+  # 6. Audit trail: one immutable bundle per commit (regulated-context habit, e.g. ISO 13485 / IEC 62304):
+  #    what was tested (SHA, image IDs, SBOMs), how (workflow run), and with which result (parity report).
+  # ---------------------------------------------------------------------------
+  evidence:
+    name: Test evidence bundle
+    needs: [build-images, parity-gate]
+    if: ${{ !cancelled() && needs.build-images.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: evidence
+          pattern: '{security-*,parity-report}'
+      - name: Write manifest
+        env:
+          GATE: ${{ needs.parity-gate.outputs.gate }}
+          STATUS: ${{ needs.parity-gate.outputs.status }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          cat > evidence/manifest.json <<JSON
+          {
+            "repository": "${GITHUB_REPOSITORY}",
+            "commit_sha": "${GITHUB_SHA}",
+            "ref": "${REF}",
+            "event": "${EVENT}",
+            "actor": "${ACTOR}",
+            "workflow_run": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}",
+            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
+            "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "parity_gate": "${GATE:-unknown}",
+            "test_status": "${STATUS:-unknown}"
+          }
+          JSON
+          (cd evidence && find . -type f -exec sha256sum {} + > "$RUNNER_TEMP/SHA256SUMS") && mv "$RUNNER_TEMP/SHA256SUMS" evidence/SHA256SUMS
+          cat evidence/manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: evidence-${{ github.sha }}
+          path: evidence/
+          retention-days: 90

@@ -1,9 +1,15 @@
 {
   "name": "cypress-to-playwright-migration-poc",
   "private": true,
+  "engines": { "node": ">=20" },
   "scripts": {
     "test:cypress": "npm --prefix cypress-suite test",
     "test:playwright": "npm --prefix playwright-suite test",
-    "report": "node reporting/transform-results-to-powerbi.js"
+    "test:tooling": "node --test reporting/test/*.test.js",
+    "report": "node reporting/transform-results-to-powerbi.js",
+    "compare": "node reporting/parity-report.js"
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.16"
   }
 }

@@ -1,0 +1,22 @@
+# Keeps actions, npm/pip dependencies and base images patched (supply-chain hygiene).
+# Playwright upgrades must bump @playwright/test AND the mcr.microsoft.com/playwright image together:
+# Dependabot opens separate PRs, and the CI static checks + dual run validate each one.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      actions: { patterns: ['*'] }
+  - package-ecosystem: npm
+    directories: ['/', '/cypress-suite', '/playwright-suite']
+    schedule: { interval: weekly }
+    groups:
+      playwright: { patterns: ['@playwright/*', 'playwright-bdd'] }
+      cypress: { patterns: ['cypress', '@badeball/*', '@bahmutov/*', 'mochawesome'] }
+  - package-ecosystem: docker
+    directory: /docker
+    schedule: { interval: weekly }
+  - package-ecosystem: pip
+    directory: /agents/test-agent
+    schedule: { interval: weekly }

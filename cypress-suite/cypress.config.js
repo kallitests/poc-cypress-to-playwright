@@ -8,8 +8,12 @@ module.exports = defineConfig({
     baseUrl: process.env.BASE_URL || 'https://automationexercise.com',
     specPattern: 'cypress/e2e/features/**/*.feature',
     video: false,
+    // Same retry budget as Playwright in CI (retries: 1) so the dual-run comparison stays fair.
+    retries: { runMode: 1, openMode: 0 },
+    // Keep every artefact under results/ so CI collects reports and screenshots from one folder.
+    screenshotsFolder: 'results/screenshots',
     reporter: 'mochawesome',
-    reporterOptions: { reportDir: 'results', overwrite: false, html: false, json: true },
+    reporterOptions: { reportDir: 'results/mochawesome', overwrite: false, html: false, json: true },
     async setupNodeEvents(on, config) {
       await addCucumberPreprocessorPlugin(on, config);
       on('file:preprocessor', createBundler({ plugins: [createEsbuildPlugin(config)] }));
