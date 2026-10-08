@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Harnais pytest pour tester des agents LangGraph — unitaire, intégration, évaluation LLM-judge via LangSmith"
 requires-python = ">=3.11"
 dependencies = [
-    "langchain>=0.3.0",
+    "langchain>=1.4.3",
     "langchain-anthropic>=0.3.0",
     "langgraph>=0.2.0",
     "langsmith>=0.2.0",
