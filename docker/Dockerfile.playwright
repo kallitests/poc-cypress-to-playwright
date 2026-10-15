@@ -1,6 +1,6 @@
 # Use the official Playwright image: it bundles the browsers AND their system libraries.
 # Its version MUST match @playwright/test in package-lock.json, otherwise the runner looks for browser builds that are not installed.
-FROM mcr.microsoft.com/playwright:v1.50.1-noble
+FROM mcr.microsoft.com/playwright:v1.64.1-noble
 # Keep the target suite in a predictable working directory.
 WORKDIR /app
 # Copy dependency metadata first so the npm layer is cached until the lockfile changes.
